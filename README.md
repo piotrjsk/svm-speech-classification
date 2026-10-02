@@ -57,6 +57,7 @@ Multiple algorithms were benchmarked during the experimental phase:
 ├── .gitignore              # Git exclusion rules
 ├── .Rprofile               # Automatic renv environment activation
 ├── renv.lock               # Reproducible package environment lockfile
+├── README.md               # Project documentation
 │
 ├── data/
 │   └── dane.csv            # Raw acoustic dataset
@@ -68,8 +69,8 @@ Multiple algorithms were benchmarked during the experimental phase:
 │   ├── svm_speech_classification_report.Rmd   # RMarkdown report source
 │   └── svm_speech_classification_report.pdf   # Compiled PDF report
 │
-├──renv/                   # Isolated virtual environment configuration
-└── README.md
+└── renv/                   # Isolated virtual environment configuration
+
 ```
 
 ## Key Technical Skills Demonstrated
