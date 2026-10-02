@@ -27,8 +27,8 @@ The final model, based on **Support Vector Machines (SVM) with a Radial Basis Fu
 
 ### 1. Data Splitting & Validation (`tidymodels`)
 * **Input Features:** 618 numerical acoustic features representing speech signals.
-* **Data Split:** 80% training set and 20% test set using class stratification (`strata = klasa`) to maintain identical letter distributions across splits[cite: 31].
-* **Validation Strategy:** 5-fold cross-validation (`vfold_cv`) on the training set to prevent overfitting during hyperparameter selection[cite: 31].
+* **Data Split:** 80% training set and 20% test set using class stratification (`strata = klasa`) to maintain identical letter distributions across splits.
+* **Validation Strategy:** 5-fold cross-validation (`vfold_cv`) on the training set to prevent overfitting during hyperparameter selection.
 
 ### 2. Feature Engineering Pipeline (`recipes`)
 * **`step_nzv()`**: Filters out Near-Zero Variance features to remove uninformative background noise.
