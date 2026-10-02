@@ -5,6 +5,7 @@
 .Rproj.user/
 
 models/*.rds
+!models/.gitkeep
 
 # --- Tymczasowe pliki renderowania RMarkdown ---
 *.knit.md
