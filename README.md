@@ -1,7 +1,8 @@
 # English Alphabet Speech Signal Recognition (SVM Classification)
 
-![R](https://img.shields.io/badge/Language-R-blue.svg)
+![Language](https://img.shields.io/badge/Language-R_4.x-276DC3.svg?logo=r&logoColor=white)
 ![Framework](https://img.shields.io/badge/Framework-Tidymodels-orange.svg)
+![Domain](https://img.shields.io/badge/Domain-Machine_Learning_%26_XAI-blue.svg)
 ![Model](https://img.shields.io/badge/Model-SVM%20(RBF)-green.svg)
 ![Accuracy](https://img.shields.io/badge/Accuracy-96.96%25-brightgreen.svg)
 
