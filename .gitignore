@@ -1,0 +1,27 @@
+# --- Historie i dane sesji R ---
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+
+models/*.rds
+
+# --- Tymczasowe pliki renderowania RMarkdown ---
+*.knit.md
+*.utf8.md
+
+# --- Pakiety i środowisko renv ---
+renv/library/
+renv/python/
+renv/staging/
+
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.vscode/
+.DS_Store
+Thumbs.db

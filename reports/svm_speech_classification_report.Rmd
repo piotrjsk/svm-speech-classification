@@ -1,0 +1,426 @@
+---
+title: "Rozpoznawanie sygnałów mowy alfabetu angielskiego przy użyciu zoptymalizowanego modelu SVM"
+author: "Piotr Jasiak, Władysław Morawski"
+date: "`r Sys.Date()`"
+subtitle: "Raport z budowy i ewaluacji klasyfikatora o wysokiej skuteczności (96,9%)"
+output:
+  html_document:
+    theme: paper
+    highlight: tango
+    toc: false
+    number_sections: false
+  pdf_document:
+    toc: false
+---
+
+<style type="text/css">
+
+body {
+  /* Wybrana czcionka szeryfowa dla wysokiej czytelności */
+  font-family: 'Merriweather', Georgia, serif;
+  font-size: 14px;
+  text-align: justify;
+  line-height: 1.8;
+  color: #222222;
+}
+
+h1 {
+  /* Nagłówki w błękicie, odróżniające się od treści */
+  font-family: 'Segoe UI', Arial, sans-serif;
+  font-size: 22px !important;
+  font-weight: bold;
+  color: #2980b9;
+  border-bottom: 2px solid #2980b9;
+  padding-bottom: 8px;
+  margin-top: 35px;
+  margin-bottom: 15px;
+}
+
+h2 {
+  font-family: 'Segoe UI', Arial, sans-serif;
+  font-size: 18px !important;
+  color: #3498db;
+  font-weight: 600;
+  margin-top: 25px;
+}
+
+h1.title {
+  font-family: 'Segoe UI', sans-serif;
+  font-size: 26px !important;
+  color: #2980b9;
+  text-align: center;
+  border: none;
+  margin-bottom: 5px;
+}
+
+h3.subtitle {
+  font-family: 'Merriweather', serif;
+  text-align: center;
+  font-style: italic;
+  color: #7f8c8d;
+  font-size: 17px;
+  margin-bottom: 30px;
+}
+
+h4.author, h4.date {
+  font-family: 'Segoe UI', sans-serif;
+  text-align: center;
+  color: #555;
+  font-weight: 500;
+  margin-bottom: 5px;
+}
+
+.pagebreak { 
+  clear: both;
+  height: 0; 
+  break-before: page; 
+  page-break-before: always; 
+  visibility: hidden;
+  display: block;
+}
+
+code {
+  color: #e74c3c;
+  background-color: #f4f7f9;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+}
+</style>
+
+```{r pakiety, include=FALSE}
+# WCZYTANIE PAKIETÓW
+library(tidyverse)
+library(tidymodels)
+library(kernlab)
+library(ggplot2)
+library(viridis)
+library(dplyr)
+library(knitr)
+library(tidyr)
+
+# TAKI SAM SEED DLA POWTARZALNOŚCI
+set.seed(123)
+```
+
+```{r model, include=FALSE}
+# WCZYTANIE MODELU I DANYCH
+model_final <- readRDS("models/model_svm.rds")
+
+dane <- read.csv("data/dane.csv") %>% select(-1) %>% mutate(klasa = as.factor(klasa))
+
+data_split <- initial_split(dane, prop = 0.80, strata = klasa)
+dane_train <- training(data_split)
+dane_test  <- testing(data_split)
+
+# PREDYKCJA
+results <- predict(model_final, new_data = dane_test) %>%
+  bind_cols(dane_test %>% select(klasa))
+
+# OBLICZENIE METRYK (Accuracy & Kappa)
+metrics_res <- results %>%
+  metrics(truth = klasa, estimate = .pred_class)
+
+# Wyciągnięcie parametrów cost i rbf_sigma
+silnik <- extract_spec_parsnip(model_final)
+```
+
+# 1. Wstęp teoretyczny i charakterystyka problemu
+
+Celem projektu jest stworzenie **modelu klasyfikacyjnego** zdolnego do rozpoznawania 26 liter alfabetu angielskiego. Dane wejściowe to 618 cech numerycznych stanowiących parametryczną reprezentację sygnałów akustycznych.
+
+**Wybór modelu:** Zastosowano **Maszynę Wektorów Nośnych (SVM)** z jądrem **RBF** (Radial Basis Function). Wybór ten podyktowany jest wysoką wymiarowością danych. SVM z nieliniowym jądrem pozwala na odnalezienie złożonych granic decyzyjnych w przestrzeniach, gdzie klasy nie są separowalne liniowo.
+
+<div class="pagebreak"></div>
+
+# 2. Przygotowanie danych i strategia walidacji
+
+Pierwszym etapem jest wczytanie danych oraz ich podział na zbiory treningowy i testowy w celu obiektywnej oceny błędu generalizacji.
+```{r split, eval = FALSE}
+dane <- read.csv("dane.csv") %>% 
+  select(-1) %>% 
+  mutate(klasa = as.factor(klasa))
+
+set.seed(123)
+data_split <- initial_split(dane, prop = 0.80, strata = klasa)
+dane_train <- training(data_split)
+dane_test  <- testing(data_split)
+
+folds_train <- vfold_cv(dane_train, v = 5, strata = klasa)
+```
+
+* **Czyszczenie danych (**`select(-1)`**):** Z ramki danych usunięto pierwszą kolumnę, która pełniła jedynie funkcję porządkową **(indeks).** Pozostawienie jej mogłoby wprowadzić do modelu sztuczną zależność, gdzie numer wiersza byłby błędnie interpretowany jako cecha sygnału.
+
+* **Stratyfikacja (**`strata = klasa`**):** Zastosowana, aby zapewnić **identyczny rozkład** wszystkich 26 liter w obu zbiorach. Zapobiega to sytuacji, w której model nie miałby szansy nauczyć się rzadszych liter.
+
+* **Walidacja Krzyżowa (**`vfold_cv`**):** Zastosowanie 5-krotnej walidacji krzyżowej na zbiorze treningowym pozwala na estymację **stabilności** modelu już na etapie uczenia, co chroni nas przed przypadkowym wyborem parametrów pod konkretny, statyczny podbiór danych.
+
+
+# 3. Optymalizacja przestrzeni cech (Receptura)
+
+Proces przygotowania danych (preprocessing) jest fundamentem sukcesu modelu. Zastosowana receptura obejmuje trzy kluczowe transformacje:
+```{r recipe, eval = FALSE}
+rec_final <- recipe(klasa ~ ., data = dane_train) %>%
+  step_nzv(all_predictors()) %>%
+  step_YeoJohnson(all_numeric_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+```
+
+<div class="pagebreak"></div>
+
+## **3.1. Zastosowanie step_nzv (Near Zero Variance)**
+
+* **Cel:** Eliminacja zmiennych, które niosą znikomą informację.
+
+* **Uzasadnienie:** Wiele cech sygnałowych to stałe lub prawie **stałe wartości** (np. szum tła). Zostawienie ich mogłoby teoretycznie wydawać się korzystne, jednak w praktyce wprowadza do modelu tzw. **"szum informacyjny".** Model SVM mógłby zacząć doszukiwać się fałszywych wzorców w tych danych, co prowadziłoby do przeuczenia (overfittingu). Usunięcie ich oczyszcza przestrzeń decyzyjną.
+
+## **3.2. Zastosowanie step_YeoJohnson**
+
+* **Cel:** Stabilizacja wariancji i zbliżenie rozkładów do normalności.
+
+* **Uzasadnienie:** Cechy akustyczne często mają **rozkłady skośne.** SVM bazuje na odległościach, a te najlepiej działają, gdy dane są rozłożone **symetrycznie.** Transformacja Yeo-Johnsona "prostuje" dane, co ułatwia matematycznemu silnikowi SVM znalezienie optymalnej hiperpłaszczyzny oddzielającej litery.
+
+* **Podstawa matematyczna:** Transformacja definiowana jest wzorem zależnym od wartości predyktora $x$:
+
+$$
+\psi(x, \lambda) = 
+\begin{cases} 
+\frac{(x + 1)^\lambda - 1}{\lambda} & \text{dla } x \geq 0, \lambda \neq 0 \\
+\ln(x + 1) & \text{dla } x \geq 0, \lambda = 0 \\
+\frac{-[(-x + 1)^{2-\lambda} - 1]}{2 - \lambda} & \text{dla } x < 0, \lambda \neq 2 \\
+-\ln(-x + 1) & \text{dla } x < 0, \lambda = 2
+\end{cases}
+$$
+
+Dzięki tej nieliniowej transformacji, "prostujemy" dane w przestrzeni wielowymiarowej, co pozwala silnikowi SVM na znacznie łatwiejsze wyznaczenie optymalnej hiperpłaszczyzny oddzielającej poszczególne litery.
+
+
+## **3.3 Zastosowanie step_normalize**
+
+* **Cel:** Ujednolicenie skali wszystkich 617 predyktorów.
+
+* **Uzasadnienie:** Jest to krok krytyczny dla jądra RBF. Model SVM oblicza **odległość euklidesową** między punktami. Bez normalizacji, cecha o wartościach 0-1000 zdominowałaby cechę o wartościach 0-1, mimo że ta druga mogłaby być ważniejsza dla rozpoznania litery. Standaryzacja daje każdemu predyktorowi "równy głos".
+
+<div class="pagebreak"></div>
+
+# 4. Analiza wpływu redukcji wymiarowości (PCA) na jakość klasyfikacji
+
+W toku prac przetestowano zastosowanie **Analizy Składowych Głównych (PCA).** Choć metoda ta **skróciła czas obliczeń**, to jednocześnie spowodowała **wyraźny spadek dokładności modelu**. Rezygnacja z tego kroku wynikała z faktu, że **PCA jako proces nienadzorowany** usuwa cechy o małej zmienności, które w przypadku rozpoznawania liter (np. „B” vs „P”) często niosą kluczowe informacje różnicujące. Pozostawienie pełnego zestawu 617 cech pozwoliło w pełni wykorzystać potencjał algorytmu SVM z jądrem RBF, który natywnie bardzo dobrze zarządza **wysoką wymiarowością danych.** Dzięki temu model zachował dostęp do wszystkich informacji dyskryminacyjnych, co pozwoliło uzyskać zdecydowanie wyższy wynik końcowy.
+
+
+# 5. Optymalizacja hiperparametrów (Tuning Bayesowski)
+
+W modelu SVM z jądrem RBF kluczowe znaczenie mają dwa parametry: **cost** (kara za błędną klasyfikację) oraz **rbf_sigma** (zasięg oddziaływania pojedynczego punktu danych). Aby odnaleźć ich idealną kombinację, zastosowano **optymalizację bayesowską.**
+```{r tune, eval = FALSE}
+spec_svm <- svm_rbf(cost = tune(), rbf_sigma = tune()) %>%
+  set_engine("kernlab") %>% 
+  set_mode("classification")
+
+set.seed(123)
+res_svm <- tune_bayes(
+  workflow() %>% add_recipe(rec_final) %>% add_model(spec_svm),
+  resamples = folds_train, 
+  initial = 5, 
+  iter = 20,
+  metrics = metric_set(accuracy),
+  control = control_bayes(verbose = TRUE, no_improve = 10)
+)
+```
+
+<div class="pagebreak"></div>
+
+## **5.1 Tuning Bayesowski, zamiast Grid Search**
+
+* **Cel:** Szybkie i inteligentne odnalezienie globalnego maksimum dokładności (Accuracy).
+
+* **Grid Search** polega na przeszukiwaniu z góry ustalonej, sztywnej siatki parametrów. Algorytm sprawdza każdą kombinację po kolei w sposób mechaniczny, co przy dużej liczbie predyktorów i szerokim zakresie poszukiwań jest niezwykle **czasochłonne i nieefektywne**, ponieważ marnuje zasoby na sprawdzanie obszarów o niskiej jakości. 
+* **Optymalizacja bayesowska** wykorzystuje **model probabilistyczny** do estymacji wyników. Algorytm analizuje rezultaty poprzednich prób i na ich podstawie wyznacza kolejne punkty testowe w miejscach, które dają największą szansę na pobicie aktualnego **rekordu dokładności.** Pozwala to na uniknięcie sprawdzania nieefektywnych kombinacji i skupienie mocy obliczeniowej tam, gdzie prawdopodobieństwo znalezienia optymalnych wartości `cost` i `sigma` jest najwyższe.
+
+## **5.2 Znaczenie parametrów initial i iter**
+
+1. **initial = 5:** Na początku algorytm wykonuje 5 **losowych testów**, aby stworzyć wstępną mapę wyników. Można to porównać do wysłania zwiadowców w różne rejony mapy.
+
+2. **iter = 20:** To 20 kolejnych, **inteligentnych kroków.** W każdej iteracji algorytm wybiera takie wartości cost i sigma, które dają największą szansę na pobicie dotychczasowego rekordu dokładności.
+
+## **5.3 Rola parametrów Cost i Sigma**
+
+* **Cost (C):** Kontroluje **równowagę** między prostotą modelu a jego bezbłędnością. Wysoki koszt zmusza model do poprawnego sklasyfikowania każdego punktu (ryzyko przeuczenia), niski pozwala na pewne błędy w zamian za gładszą granicę decyzji.
+
+* **Sigma ($\gamma$):** Definiuje, **jak daleko sięga wpływ** pojedynczego punktu treningowego. Wysoka sigma sprawia, że model skupia się na bardzo bliskich sąsiadach (prowadzi do bardzo powyginanych granic klas), mała sigma daje bardziej ogólne spojrzenie na dane.
+
+<div class="pagebreak"></div>
+
+# 6. Ewaluacja modelu na zbiorze testowym
+
+Przechodzimy do prezentacji wyników uzyskanych przez ostateczną wersję modelu na zbiorze testowym. Dzięki zastosowaniu zoptymalizowanych hiperparametrów sprawdzamy, jak algorytm radzi sobie z danymi, z którymi nie miał wcześniej kontaktu. Wyniki te stanowią ostateczne potwierdzenie skuteczności systemu w rozpoznawaniu liter alfabetu na podstawie surowych danych sygnałowych.
+
+## **6.1. Charakterystyka wybranych parametrów**
+
+W toku obliczeń algorytm wyznaczył optymalne wartości dla dwóch kluczowych hiperparametrów jądra RBF:
+
+* **Koszt ($C \approx 31,91$):** Jest to relatywnie wysoka wartość, która zmusza model do **rygorystycznego przestrzegania** poprawności klasyfikacji na zbiorze treningowym. W kontekście 26 liter alfabetu, taki wybór pozwolił na precyzyjne odseparowanie klas o bardzo zbliżonej charakterystyce sygnału.
+
+* **Sigma ($\sigma \approx 0,00119$):** Niska wartość sigmy oznacza, że funkcja jądrowa ma **szeroki zasięg**, co przekłada się na płynne granice decyzyjne. Zapobiega to nadmiernemu dopasowaniu modelu do szumu w konkretnych nagraniach i ułatwia rozpoznawanie liter nagranych w innych warunkach.
+
+* **Liczba wektorów nośnych:** Model oparł swoją strukturę na **3551 wektorach nośnych.** Są to kluczowe punkty danych ze zbioru treningowego, które wyznaczają granice między literami. Taka liczba świadczy o złożoności problemu, ale mieści się w granicach zapewniających szybką predykcję.
+
+## **6.2 Skuteczność klasyfikacji**
+
+Ostateczna weryfikacja modelu na danych testowych (20% całego zbioru) potwierdziła jego wysoką skuteczność w rozpoznawaniu liter alfabetu angielskiego. Wyniki przedstawiają się następująco:
+```{r wyniki, echo = FALSE}
+wyniki <- metrics_res %>%
+  select(.metric, .estimate) %>%
+  mutate(
+    .metric = case_when(
+      .metric == "accuracy" ~ "Accuracy (Dokładność)",
+      .metric == "kap" ~ "Kappa (Zgodność)",
+      TRUE ~ .metric
+    ),
+    Opis = case_when(
+      grepl("Accuracy", .metric) ~ "Odsetek poprawnie rozpoznanych liter.",
+      grepl("Kappa", .metric) ~ "Miara zgodności skorygowana o losowe trafienia.",
+      TRUE ~ ""
+    )
+  )
+kable(wyniki, 
+      digits = 4, 
+      col.names = c("Metryka", "Wartość", "Opis znaczenia"))
+```
+
+* **Accuracy = 96,96%:** Wynik ten potwierdza, że zdecydowana większość sygnałów akustycznych została przypisana do właściwych liter. Tak wysoki procent poprawnych wskazań przy 26 kategoriach dowodzi, że model potrafi **bardzo precyzyjnie** wyodrębnić unikalne cechy każdej litery z szumu informacyjnego.
+
+* **Kappa = 0,9683:** Metryka ta ocenia, na ile wynik modelu wynika z faktycznej wiedzy, a nie z przypadku. Kappa porównuje **dokładność modelu** z prawdopodobieństwem **losowego trafienia** (które przy 26 klasach wynosi tylko ok. 3,8%). Wartość 0,9683 mieści się w przedziale „niemal idealnej zgodności” (powyżej 0,90). Oznacza to, że model niemal całkowicie wyeliminował błąd losowy i opiera swoje decyzje na bardzo solidnych wzorcach akustycznych wypracowanych w procesie uczenia.
+
+<div class="pagebreak"></div>
+
+# 7. Analiza modelu SVM – przyczyny wysokiej skuteczności
+
+Wysoki wynik uzyskany na zbiorze testowym nie jest przypadkowy. Wynika on ze specyfiki algorytmu Maszyny Wektorów Nośnych (SVM) oraz jej współdziałania z danymi akustycznymi. Do najważniejszych czynników sukcesu należą:
+
+## **Efektywne radzenie sobie z wysoką wymiarowością: **
+
+Nasz zbiór danych zawiera aż 617 cech opisujących każdy sygnał dźwiękowy. Wiele tradycyjnych modeli (jak regresja logistyczna czy proste drzewa decyzyjne) mogłoby mieć problem z tak dużą liczbą zmiennych. SVM jest jednak zaprojektowany tak, aby szukać **hiperpłaszczyzny**, która maksymalizuje margines między klasami. Dzięki temu algorytm skupia się na najważniejszych różnicach w danych, ignorując mniej istotne detale.
+
+## **Zastosowanie jądra RBF:**
+
+Dźwięki liter alfabetu są złożone i rzadko dają się oddzielić liniowo. Wykorzystanie jądra RBF tzw. **triku jądrowego** pozwoliło modelowi na rzutowanie danych w nieskończenie wymiarową przestrzeń. W tej nowej przestrzeni model był w stanie wyznaczyć nieliniowe, bardzo precyzyjne granice decyzyjne między literami, które w swojej pierwotnej formie mogły się na siebie nakładać.
+
+## **Odporność na szum akustyczny:**
+
+Dzięki odpowiednio dobranemu parametrowi kosztu ($C$), model nie próbował dopasować się idealnie do każdego pojedynczego nagrania (co mogłoby oznaczać naukę szumu tła), lecz **szukał ogólnych tendencji.** W połączeniu z niską wartością parametru $\sigma$, granice między literami stały się płynne i stabilne, co pozwoliło modelowi zachować precyzję nawet przy drobnych zniekształceniach dźwięku.
+
+## **Stabilność dzięki wektorom nośnym:**
+
+Model sfinalizowano w oparciu o 3551 wektorów nośnych. Są to te najtrudniejsze do sklasyfikowania przypadki, które leżą najbliżej granic między literami. Fakt, że model opiera swoje decyzje tylko na tych kluczowych punktach, czyni go niezwykle **odpornym i precyzyjnym** w rozstrzyganiu "niepewnych" nagrań.
+
+<div class="pagebreak"></div>
+
+# 8. Wizualizacja wyników i analiza błędów
+
+Aby lepiej zrozumieć, jak model radzi sobie w praktyce, przygotowano dwie kluczowe wizualizacje: macierz pomyłek oraz wykres skuteczności dla poszczególnych klas.
+
+## **8.1. Macierz pomyłek (Confusion Matrix)**
+
+Macierz pomyłek pozwala zaobserwować, czy błędy modelu są rozproszone, czy też istnieją konkretne pary liter, które algorytm ze sobą myli. Gęsto wypełniona przekątna świadczy o bardzo wysokiej jakości klasyfikacji.
+
+```{r plot_matrix, echo=FALSE, fig.height=6, fig.align='center', warning = FALSE, message = FALSE}
+### 8.1. Macierz pomyłek (Finalna wersja: lekkie liczby i szare tło dla zer)
+
+p <- results %>%
+  conf_mat(truth = klasa, estimate = .pred_class) %>%
+  autoplot(type = "heatmap")
+
+p + geom_text(aes(label = after_stat(fill)), 
+            size = 3, 
+            fontface = "plain", 
+            color = "black") +
+  scale_fill_gradientn(
+    trans = "log10",
+    colors = c("#FFF9C4", "#FFB300", "#FF3D00", "#4CAF50", "#1B5E20"),
+    breaks = c(1, 5, 10, 50),
+    labels = c(1, 5, 10, 50),
+    name = "Liczba",
+    na.value = "#F0F0F0"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.background = element_rect(fill = "#F9F9F9", color = NA),
+    axis.text.x = element_text(size = 11, face = "bold", color = "black"),
+    axis.text.y = element_text(size = 11, face = "bold", color = "black"),
+    panel.grid = element_blank(),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5)
+  ) +
+  labs(
+    title = "Macierz pomyłek - Analiza klasyfikacji",
+    x = "Predykcja modelu", 
+    y = "Wartość rzeczywista"
+  )
+```
+
+<div class="pagebreak"></div>
+
+## **8.2. Skuteczność rozpoznawania poszczególnych liter**
+
+Wykres kolumnowy prezentuje czułość klasyfikacji dla każdego znaku. Pozwala on ocenić, na ile model jest stabilny dla całego alfabetu, a nie tylko dla wybranych, łatwiejszych do rozpoznania liter.
+
+```{r plot_bar, echo=FALSE, fig.height=6, fig.align='center', warning = FALSE, message = FALSE}
+recall_data <- results %>%
+  group_by(klasa) %>%
+  summarise(czulosc = sum(klasa == .pred_class) / n()) %>%
+  ungroup()
+
+ggplot(recall_data, aes(x = reorder(klasa, czulosc), y = czulosc, fill = czulosc)) +
+  geom_col(color = "white", lwd = 0.2) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "gray60") +
+  scale_fill_gradientn(
+    colors = c("#FF3D00", "#FFB300", "#4CAF50", "#1B5E20"),
+    name = "Skuteczność"
+  ) +
+  scale_y_continuous(limits = c(0, 1.05), breaks = seq(0, 1, 0.1)) +
+  labs(
+    title = "Analiza czułości modelu dla poszczególnych liter alfabetu",
+    x = "Litera",
+    y = "Czułość (Recall)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 11, hjust = 0.5),
+    axis.text.x = element_text(size = 11, face = "bold", color = "black"),
+    axis.title = element_text(size = 12, face = "bold"),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom"
+  )
+```
+
+Większość liter osiąga maksymalną wartość 1.0, co oznacza bezbłędną klasyfikację w zbiorze testowym. Minimalne spadki, które można zaobserwować, wciąż utrzymują się powyżej poziomu 90%, co w cyfrowym przetwarzaniu sygnałów mowy jest wynikiem wybitnym.
+
+<div class="pagebreak"></div>
+
+# 9. Podsumowanie i wnioski końcowe
+
+Celem projektu było stworzenie modelu klasyfikacyjnego zdolnego do precyzyjnego rozpoznawania liter alfabetu angielskiego na podstawie ich numerycznych charakterystyk. Po przeprowadzeniu szeregu eksperymentów obejmujących różne rodziny algorytmów (SVM, Random Forest, Regresja Logistyczna) oraz strategie przetwarzania wstępnego, jako rozwiązanie finalne wybrano **model SVM z jądrem radialnym**.
+
+Model ten osiągnął najwyższą skuteczność na zbiorze testowym wynoszącą **96,96%**.
+
+## **Proces wyboru modelu i analiza porównawcza**
+
+Ewolucja rozwiązania przebiegała w kilku kluczowych etapach, które pozwoliły wyeliminować mniej skuteczne podejścia:
+
+1.  **Analiza porównawcza (Benchmark):** W toku badań model SVM systematycznie przewyższał konkurencyjne rozwiązania. Algorytm Random Forest, mimo prób optymalizacji (m.in. 500 drzew, selekcja zmiennych), osiągał wyniki konsekwentnie niższe o ok. 1-3 punkty procentowe (max. ~94,9%). Regresja Logistyczna z regularyzacją Elastic Net, choć skuteczniejsza od Lasów Losowych (~95,7%), również nie dorównała nieliniowemu SVM.
+2.  **Weryfikacja redukcji wymiarowości:** Eksperymenty z zastosowaniem PCA (Analiza Głównych Składowych) wykazały, że agresywna redukcja wymiarów prowadzi do utraty istotnych informacji, obniżając skuteczność SVM do poziomu 95,5%. Potwierdziło to konieczność pracy na pełnym lub niemal pełnym zbiorze cech.
+3.  **Decyzja dotycząca Ensemble Learning (Stacking):** Rozważano budowę meta-modelu łączącego predykcje SVM i Random Forest (stacking). Ostatecznie odstąpiono od tego pomysłu. Analiza błędów wykazała, że Random Forest mylił się częściej i w dużej mierze na tych samych przypadkach co SVM, nie wnosząc nowej "wiedzy" do systemu. Uznano, że włączenie słabszego estymatora wprowadziłoby jedynie zbędną złożoność obliczeniową bez gwarancji poprawy wyników.
+
+## **Charakterystyka rozwiązania finalnego**
+
+Ostateczny model stanowi zoptymalizowaną wersję podejścia z pierwszej iteracji (transformacja Yeo-Johnson, tunning Bayesowski). Kluczowym czynnikiem sukcesu okazało się precyzyjne dostrojenie hiperparametrów jądra radialnego:
+
+* Wysoka wartość parametru: **Cost (ok. 32)** wymusiła na modelu restrykcyjne podejście do błędów klasyfikacji.
+
+* Dobór parametru **Sigma (ok. 0.0012)** pozwolił na utworzenie bardzo szczegółowych granic decyzyjnych, dopasowanych do lokalnej struktury danych w 618-wymiarowej przestrzeni.
+
+Przyjęte rozwiązanie charakteryzuje się najlepszym balansem między precyzją, a stabilnością działania, skutecznie separując nawet trudne do rozróżnienia klasy liter.
