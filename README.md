@@ -90,4 +90,4 @@ Rscript -e "rmarkdown::render('reports/svm_speech_classification_report.Rmd', ou
 ```
 
 ---
-*Developed by Piotr Jasiak & Władysław Morawski | [LinkedIn Profile](www.linkedin.com/in/piotrjasiak)
+*Developed by Piotr Jasiak & Władysław Morawski | [LinkedIn Profile](https://www.linkedin.com/in/piotrjasiak)
